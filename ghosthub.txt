@@ -1,0 +1,1166 @@
+--[[
+    GHOST HUB-SUPORTE  v6.0
+    Base da lógica: text_4.txt (PartTele + TweenService + TP) — Speed padrão 300
+    + Auto Chest rápido (Grab & Go, sem esperar o baú sumir)
+    + Tween+TP: faz tween e nos ultimos X metros (padrao 20) dá TP direto
+    + Boost Speed ao chegar perto do baú
+    + Verificação de Beli com intervalo escolhido pelo jogador
+    + Baús sem skin / Caixa colorida no lugar do baú (prata/ouro/diamante)
+    + Bring Fruits (Tween até a fruta / TP na fruta / Puxar fruta pra você) 0..10000
+    + Filtro de raridade + Blacklist (maçã, banana, abacaxi...)
+    + Mob Pull de verdade (modelo inteiro, mobs de Raid/Dungeon) + Reset de ilha
+    + Player de música (presets + ID customizado + volume) + FOV
+    + UI preta com neon verde + azul neon escuro, luz verde nas funções ativas,
+      fantasma, bolinha fluente pra minimizar/maximizar, painel financeiro separado
+    + Notificações + mensagem no chat ao ativar
+    + STOP em Fist of Darkness / Punho das Trevas / God's Chalice / Cálice de Deus
+]]
+
+if _G.GHOSTSUP_CLEANUP then pcall(_G.GHOSTSUP_CLEANUP) end
+
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local RunService        = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService  = game:GetService("UserInputService")
+local StarterGui        = game:GetService("StarterGui")
+local CoreGui           = game:GetService("CoreGui")
+local SoundService      = game:GetService("SoundService")
+
+local player = Players.LocalPlayer
+
+----------------------------------------------------------------- ESTADO
+_G.GS = _G.GS or {}
+local S = {
+    -- CHEST
+    FarmChest    = false,
+    Method       = "Tween",      -- Tween | TP | TweenTP
+    TweenSpeed   = 300,          -- padrao 300 (serve pra TODAS as funcoes de tween)
+    TPRange      = 20,           -- Tween+TP: nos ultimos 20m dá TP
+    TPDelay      = 0,            -- espera no baú (0 = mete o pé)
+    ReachDist    = 6,
+    GrabTime     = 0.05,         -- Grab & Go
+    BoostDist    = 150,          -- boost quando chegar a X metros
+    BoostSpeed   = 900,
+    BoostOn      = true,
+    BeliCheck    = false,        -- verificacao normal de dinheiro desligada por padrao
+    BeliEvery    = 1.0,          -- de quanto em quanto tempo verifica beli
+    FarmSilver   = true,
+    FarmGold     = true,
+    FarmDiamond  = true,
+    NoSkin       = false,        -- baú invisivel / sem animacao
+    BoxChest     = false,        -- caixa colorida no lugar do baú
+    StopLegend   = true,
+
+    -- FRUITS
+    FruitMode    = "Tween",      -- Tween | TP | Bring
+    FruitSpeed   = 300,          -- 0 .. 10000
+    AutoFruit    = false,
+    FruitNotify  = true,
+    UseBlacklist = true,
+    Rarity       = { Common=false, Uncommon=true, Rare=true, Legendary=true, Mythical=true },
+
+    -- MOBS
+    MobPull      = false,
+    MobMode      = "Tween",      -- Tween | TP
+    MobRadius    = 2000,
+    MobLimit     = 0,            -- 0 = todos
+    MobHeight    = 0,
+    MobCircle    = 14,
+    MobSpin      = true,
+    MobSpinSpeed = 0.35,
+    MobQuestOnly = false,
+    MobRaid      = true,         -- inclui Raid / Dungeon
+    IslandReset  = false,
+
+    -- MISC
+    MusicOn      = false,
+    MusicId      = 1837879082,
+    Volume       = 3,
+    FOV          = 70,
+    Preset       = true,
+}
+_G.GS = S
+_G.TweenSpeed = S.TweenSpeed
+
+local BLACKLIST = { "apple","banana","pineapple","maçã","maca","abacaxi","kilo","spike","chop","spring","bomb","smoke","spin","flame","falcon","ice","sand","dark","diamond" }
+local RARITY = {
+    Common    = { "rocket","spin","blade","spring","bomb","smoke","spike","flame","falcon","ice","sand","chop","kilo" },
+    Uncommon  = { "dark","diamond","light","rubber","barrier","ghost","magma" },
+    Rare      = { "quake","human","buddha","love","spider","sound","phoenix" },
+    Legendary = { "portal","rumble","pain","blizzard","gravity","mammoth","t-rex","dough","shadow" },
+    Mythical  = { "venom","control","spirit","dragon","leopard","kitsune","yeti","gas" },
+}
+local LEGEND_STOP = { "fist of darkness","punho das trevas","god's chalice","gods chalice","o cálice de deus","calice de deus","cálice dos deuses" }
+
+local MUSICAS = {
+    { n = "Self Care",        id = 1837879082 },
+    { n = "Back To Friends",  id = 7010810851 },
+    { n = "157",              id = 6673407264 },
+    { n = "Let The World Burn", id = 9046863599 },
+    { n = "Life Goes On",     id = 5410085763 },
+    { n = "Love Me / Not",    id = 6403436454 },
+    { n = "Alien Boy",        id = 2614604628 },
+    { n = "Daylight",         id = 12294519875 },
+    { n = "505",              id = 1836334026 },
+    { n = "Miracle Man",      id = 9047645884 },
+}
+
+local GHOST_IMG = "rbxassetid://11419706006"
+
+local function root()
+    local c = player.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function alive()
+    local c = player.Character
+    local h = c and c:FindFirstChildOfClass("Humanoid")
+    return c and h and h.Health > 0 and c:FindFirstChild("HumanoidRootPart")
+end
+
+----------------------------------------------------------------- NOTIFY / CHAT
+local notifyHolder
+local function Notify(title, txt, cor)
+    if not notifyHolder then return end
+    local f = Instance.new("Frame")
+    f.Size = UDim2.fromOffset(230, 52)
+    f.BackgroundColor3 = Color3.fromRGB(8, 10, 14)
+    f.BorderSizePixel = 0
+    f.Parent = notifyHolder
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
+    local st = Instance.new("UIStroke", f)
+    st.Color = cor or Color3.fromRGB(60, 255, 130)
+    st.Thickness = 1.5
+    local t = Instance.new("TextLabel", f)
+    t.BackgroundTransparency = 1
+    t.Size = UDim2.new(1, -12, 0, 20)
+    t.Position = UDim2.fromOffset(8, 5)
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Font = Enum.Font.GothamBold
+    t.TextSize = 13
+    t.TextColor3 = cor or Color3.fromRGB(60, 255, 130)
+    t.Text = title
+    local d = Instance.new("TextLabel", f)
+    d.BackgroundTransparency = 1
+    d.Size = UDim2.new(1, -12, 0, 22)
+    d.Position = UDim2.fromOffset(8, 25)
+    d.TextXAlignment = Enum.TextXAlignment.Left
+    d.Font = Enum.Font.Gotham
+    d.TextSize = 12
+    d.TextColor3 = Color3.fromRGB(225, 235, 245)
+    d.Text = txt
+    d.TextWrapped = true
+    f.BackgroundTransparency = 1
+    TweenService:Create(f, TweenInfo.new(0.25), { BackgroundTransparency = 0 }):Play()
+    task.delay(4, function()
+        pcall(function()
+            TweenService:Create(f, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
+            task.wait(0.35); f:Destroy()
+        end)
+    end)
+end
+
+local function ChatMsg(txt, cor)
+    pcall(function()
+        StarterGui:SetCore("ChatMakeSystemMessage", {
+            Text = txt,
+            Color = cor or Color3.fromRGB(60, 255, 130),
+            Font = Enum.Font.GothamBold,
+            TextSize = 18,
+        })
+    end)
+end
+
+----------------------------------------------------------------- MOVIMENTO (base text_4)
+local moving = false
+local function killPart()
+    local c = player.Character
+    if c and c:FindFirstChild("PartTele") then c.PartTele:Destroy() end
+end
+
+local function makePart()
+    local c = player.Character
+    if not c then return nil end
+    local p = c:FindFirstChild("PartTele")
+    if p then return p end
+    p = Instance.new("Part")
+    p.Size = Vector3.new(10, 1, 10)
+    p.Name = "PartTele"
+    p.Anchored = true
+    p.Transparency = 1
+    p.CanCollide = true
+    p.CFrame = c.HumanoidRootPart.CFrame
+    p.Parent = c
+    p:GetPropertyChangedSignal("CFrame"):Connect(function()
+        if moving then
+            local ch = player.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if hrp then hrp.CFrame = p.CFrame end
+        end
+    end)
+    return p
+end
+
+-- viaja até um CFrame. valid() = continua? tpRange > 0 ativa Tween+TP no final
+local function travel(target, valid, speed, tpRange, boost)
+    if not alive() then return false end
+    local part = makePart()
+    if not part then return false end
+    moving = true
+
+    while moving and (not valid or valid()) do
+        local hrp = root()
+        if not hrp then break end
+        local dist = (target.Position - hrp.Position).Magnitude
+        if dist <= S.ReachDist then break end
+
+        -- Tween + TP: nos ultimos metros dá TP direto (igual TP puro)
+        if tpRange and tpRange > 0 and dist <= tpRange then
+            part.CFrame = target
+            hrp.CFrame = target
+            break
+        end
+
+        local sp = speed
+        if boost and S.BoostOn and dist <= S.BoostDist then sp = S.BoostSpeed end
+        sp = math.clamp(sp, 1, 10000)
+
+        local step = math.min(dist, 900)
+        local goal = CFrame.new(hrp.Position + (target.Position - hrp.Position).Unit * step)
+        if step >= dist then goal = target end
+
+        local tw = TweenService:Create(part, TweenInfo.new(step / sp, Enum.EasingStyle.Linear), { CFrame = goal })
+        tw:Play()
+        local done = false
+        tw.Completed:Once(function() done = true end)
+        while not done and moving and (not valid or valid()) do task.wait(0.05) end
+        if not done then tw:Cancel() end
+    end
+
+    moving = false
+    killPart()
+    return true
+end
+
+local function tpTo(cf)
+    local hrp = root()
+    if hrp then
+        hrp.CFrame = cf
+        hrp.AssemblyLinearVelocity = Vector3.zero
+    end
+end
+
+----------------------------------------------------------------- STOP LEGENDARY
+local function checkLegend()
+    if not S.StopLegend then return end
+    local bp = player:FindFirstChild("Backpack")
+    local list = {}
+    if bp then for _, v in ipairs(bp:GetChildren()) do table.insert(list, v.Name:lower()) end end
+    local c = player.Character
+    if c then for _, v in ipairs(c:GetChildren()) do if v:IsA("Tool") then table.insert(list, v.Name:lower()) end end end
+    for _, n in ipairs(list) do
+        for _, alvo in ipairs(LEGEND_STOP) do
+            if n:find(alvo, 1, true) then
+                S.FarmChest = false
+                moving = false
+                Notify("STOP!", "Item raro encontrado: " .. n, Color3.fromRGB(255, 80, 80))
+                ChatMsg("[GHOST HUB] STOP — item raro achado: " .. n, Color3.fromRGB(255, 80, 80))
+                return true
+            end
+        end
+    end
+end
+
+----------------------------------------------------------------- BAÚS: SKIN / CAIXA
+local boxes = {}
+local function chestKind(name)
+    local n = name:lower()
+    if n:find("chest3") or n:find("diamond") then return "Diamond" end
+    if n:find("chest2") or n:find("gold") then return "Gold" end
+    return "Silver"
+end
+local BOXCOLOR = {
+    Silver  = Color3.fromRGB(235, 235, 235),
+    Gold    = Color3.fromRGB(255, 205, 0),
+    Diamond = Color3.fromRGB(0, 120, 255),
+}
+
+local function dressChest(chest)
+    if not chest or not chest.Parent then return end
+    if S.NoSkin or S.BoxChest then
+        for _, d in ipairs(chest:GetDescendants()) do
+            if d:IsA("BasePart") then
+                pcall(function() d.Transparency = 1 end)
+            elseif d:IsA("Animator") or d:IsA("ParticleEmitter") or d:IsA("Beam") or d:IsA("Trail") then
+                pcall(function() d.Enabled = false end)
+            elseif d:IsA("AnimationTrack") then
+                pcall(function() d:Stop() end)
+            end
+        end
+    end
+    if S.BoxChest and not boxes[chest] then
+        local ok, pivot = pcall(function() return chest:GetPivot() end)
+        if not ok then return end
+        local b = Instance.new("Part")
+        b.Size = Vector3.new(4, 4, 4)
+        b.Anchored = true
+        b.CanCollide = false
+        b.Material = Enum.Material.SmoothPlastic
+        b.Color = BOXCOLOR[chestKind(chest.Name)]
+        b.CFrame = pivot
+        b.Parent = workspace
+        boxes[chest] = b
+    end
+end
+
+local function clearBoxes()
+    for k, b in pairs(boxes) do pcall(function() b:Destroy() end); boxes[k] = nil end
+end
+
+----------------------------------------------------------------- AUTO CHEST
+local function getBeli()
+    local d = player:FindFirstChild("Data")
+    local b = d and d:FindFirstChild("Beli")
+    return (b and b.Value) or 0
+end
+
+local statusTxt = "Parado"
+local chestCount, beliStart = 0, getBeli()
+
+local function pickChest()
+    local hrp = root()
+    if not hrp then return nil end
+    local pos = hrp.Position
+    local best, bd = nil, math.huge
+    for _, chest in ipairs(CollectionService:GetTagged("_ChestTagged")) do
+        if chest.Parent and not chest:GetAttribute("IsDisabled") then
+            local k = chestKind(chest.Name)
+            local ok = (k == "Silver" and S.FarmSilver) or (k == "Gold" and S.FarmGold) or (k == "Diamond" and S.FarmDiamond)
+            if ok then
+                local okp, piv = pcall(function() return chest:GetPivot() end)
+                if okp then
+                    local d = (piv.Position - pos).Magnitude
+                    if d < bd then best, bd = chest, d end
+                end
+            end
+        end
+    end
+    return best, bd
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        if S.FarmChest then
+            pcall(function()
+                if checkLegend() then return end
+                if not alive() then statusTxt = "Respawn..." ; return end
+
+                local chest = pickChest()
+                if not chest then statusTxt = "Sem baú" ; return end
+
+                dressChest(chest)
+                local piv = chest:GetPivot()
+                local target = CFrame.new(piv.Position)
+                local beliBefore = getBeli()
+
+                local function valid()
+                    return S.FarmChest and chest.Parent and not chest:GetAttribute("IsDisabled")
+                end
+
+                if S.Method == "TP" then
+                    statusTxt = "TP no baú"
+                    tpTo(target)
+                    if S.TPDelay > 0 then
+                        local t = 0
+                        while t < S.TPDelay and valid() do task.wait(0.05); t = t + 0.05 end
+                    else
+                        task.wait(S.GrabTime)
+                    end
+                else
+                    statusTxt = (S.Method == "TweenTP") and "Tween+TP" or "Tween"
+                    travel(target, valid, S.TweenSpeed, (S.Method == "TweenTP") and S.TPRange or 0, true)
+                    task.wait(S.GrabTime)   -- Grab & Go: pega e mete o pé
+                end
+
+                -- verificacao de dinheiro (opcional, no intervalo escolhido)
+                if S.BeliCheck then
+                    local t = 0
+                    while t < S.BeliEvery do
+                        task.wait(0.1); t = t + 0.1
+                        if getBeli() > beliBefore then break end
+                    end
+                end
+                if getBeli() > beliBefore then chestCount = chestCount + 1 end
+                if boxes[chest] and (not chest.Parent or chest:GetAttribute("IsDisabled")) then
+                    pcall(function() boxes[chest]:Destroy() end); boxes[chest] = nil
+                end
+            end)
+        else
+            statusTxt = "Parado"
+        end
+    end
+end)
+
+-- anti-sit
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+        if S.FarmChest then
+            pcall(function()
+                local h = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+                if h and (h.Sit or h:GetState() == Enum.HumanoidStateType.Seated) then
+                    h.Sit = false; h.Jump = true
+                end
+            end)
+        end
+    end
+end)
+
+----------------------------------------------------------------- FRUITS
+local function fruitRarity(name)
+    local n = name:lower()
+    for r, list in pairs(RARITY) do
+        for _, k in ipairs(list) do if n:find(k) then return r end end
+    end
+    return "Common"
+end
+local function fruitBlocked(name)
+    local n = name:lower()
+    if S.UseBlacklist then
+        for _, b in ipairs(BLACKLIST) do if n:find(b) then return true end end
+    end
+    local r = fruitRarity(name)
+    if not S.Rarity[r] then return true end
+    return false
+end
+
+local function dropped()
+    local out = {}
+    for _, v in ipairs(workspace:GetChildren()) do
+        if v.Name:find("Fruit") or (v:IsA("Tool") and v.Name:find("Fruit")) then
+            local part = v:IsA("BasePart") and v or v:FindFirstChildWhichIsA("BasePart", true)
+            if part and not fruitBlocked(v.Name) then
+                table.insert(out, { obj = v, part = part })
+            end
+        end
+    end
+    return out
+end
+
+local seen = {}
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if S.FruitNotify then
+            pcall(function()
+                for _, f in ipairs(dropped()) do
+                    if not seen[f.obj] then
+                        seen[f.obj] = true
+                        Notify("FRUTA!", f.obj.Name .. " (" .. fruitRarity(f.obj.Name) .. ")", Color3.fromRGB(0, 200, 255))
+                        ChatMsg("[GHOST HUB] Fruta dropada: " .. f.obj.Name, Color3.fromRGB(0, 200, 255))
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.15)
+        if S.AutoFruit then
+            pcall(function()
+                local hrp = root()
+                if not hrp then return end
+                local list = dropped()
+                if #list == 0 then return end
+                table.sort(list, function(a, b)
+                    return (a.part.Position - hrp.Position).Magnitude < (b.part.Position - hrp.Position).Magnitude
+                end)
+                local f = list[1]
+                if S.FruitMode == "Bring" then
+                    -- a fruta vem pra você
+                    if f.part.Anchored then f.part.Anchored = false end
+                    f.part.CFrame = hrp.CFrame * CFrame.new(0, 2, -2)
+                    f.part.AssemblyLinearVelocity = Vector3.zero
+                elseif S.FruitMode == "TP" then
+                    tpTo(CFrame.new(f.part.Position + Vector3.new(0, 3, 0)))
+                    task.wait(0.2)
+                else
+                    travel(CFrame.new(f.part.Position + Vector3.new(0, 3, 0)),
+                        function() return S.AutoFruit and f.obj.Parent end, S.FruitSpeed, 0, false)
+                end
+            end)
+        end
+    end
+end)
+
+----------------------------------------------------------------- MOB PULL (modelo inteiro)
+local function mobFolders()
+    local t = {}
+    for _, n in ipairs({ "Enemies", "Mobs", "RaidEnemies", "Dungeon", "DungeonEnemies", "SeaBeasts" }) do
+        local f = workspace:FindFirstChild(n)
+        if f then table.insert(t, f) end
+    end
+    return t
+end
+
+local function questNames()
+    local names = {}
+    local gui = player:FindFirstChild("PlayerGui")
+    local main = gui and gui:FindFirstChild("Main")
+    local q = main and main:FindFirstChild("Quest")
+    if q then
+        for _, d in ipairs(q:GetDescendants()) do
+            if d:IsA("TextLabel") and d.Text ~= "" then table.insert(names, d.Text:lower()) end
+        end
+    end
+    return names
+end
+
+local function mobs()
+    local hrp = root()
+    local out = {}
+    if not hrp then return out end
+    local qn = S.MobQuestOnly and questNames() or nil
+    for _, folder in ipairs(mobFolders()) do
+        if not S.MobRaid and (folder.Name:find("Raid") or folder.Name:find("Dungeon")) then
+            -- pula
+        else
+            for _, m in ipairs(folder:GetChildren()) do
+                local h = m:FindFirstChildOfClass("Humanoid")
+                local r = m:FindFirstChild("HumanoidRootPart")
+                if h and r and h.Health > 0 then
+                    local d = (r.Position - hrp.Position).Magnitude
+                    local ok = d <= S.MobRadius
+                    if ok and qn then
+                        ok = false
+                        for _, nm in ipairs(qn) do
+                            if nm:find(m.Name:lower(), 1, true) then ok = true break end
+                        end
+                    end
+                    if ok then table.insert(out, { m = m, r = r, d = d }) end
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.d < b.d end)
+    if S.MobLimit > 0 then while #out > S.MobLimit do table.remove(out) end end
+    return out
+end
+
+local ang = 0
+local hb = RunService.Heartbeat:Connect(function(dt)
+    if not S.MobPull then return end
+    local hrp = root()
+    if not hrp then return end
+    local list = mobs()
+    local total = math.max(#list, 1)
+    if S.MobSpin then ang = (ang + dt * S.MobSpinSpeed) % (math.pi * 2) end
+    for i, e in ipairs(list) do
+        local a = (math.pi * 2 / total) * (i - 1) + ang
+        local pos = hrp.Position + Vector3.new(math.cos(a) * S.MobCircle, S.MobHeight, math.sin(a) * S.MobCircle)
+        local dest = CFrame.new(pos, hrp.Position)
+        -- move o MODELO todo (nao so a skin) e deixa tomar dano
+        pcall(function()
+            local h = e.m:FindFirstChildOfClass("Humanoid")
+            if h then h.PlatformStand = false; h.WalkSpeed = 0 end
+            if S.MobMode == "TP" then
+                e.m:PivotTo(dest)
+            else
+                local t = math.clamp(280 / math.max(S.TweenSpeed, 1), 0.05, 1)
+                TweenService:Create(e.r, TweenInfo.new(t, Enum.EasingStyle.Linear), { CFrame = dest }):Play()
+            end
+            e.r.AssemblyLinearVelocity = Vector3.zero
+            e.r.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+end)
+
+-- reset da ilha (morre de verdade e renasce)
+local function resetChar()
+    pcall(function()
+        local h = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        if h then h.Health = 0 end
+    end)
+end
+
+----------------------------------------------------------------- MUSICA / FOV
+local music = Instance.new("Sound")
+music.Name = "GhostHubMusic"
+music.Looped = true
+music.Volume = S.Volume / 10
+music.Parent = SoundService
+
+local function playMusic()
+    music:Stop()
+    music.SoundId = "rbxassetid://" .. tostring(S.MusicId)
+    music.Volume = math.clamp(S.Volume / 10, 0, 1)
+    if S.MusicOn then music:Play() end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        pcall(function()
+            local cam = workspace.CurrentCamera
+            if cam and math.abs(cam.FieldOfView - S.FOV) > 0.5 then cam.FieldOfView = S.FOV end
+        end)
+    end
+end)
+
+----------------------------------------------------------------- UI
+local NEON  = Color3.fromRGB(60, 255, 130)
+local BLUE  = Color3.fromRGB(0, 110, 255)
+local BG    = Color3.fromRGB(6, 8, 11)
+local BG2   = Color3.fromRGB(12, 15, 20)
+local BG3   = Color3.fromRGB(18, 22, 30)
+local WHITE = Color3.fromRGB(232, 240, 248)
+
+local function parentGui()
+    local ok, r = pcall(function() return gethui and gethui() end)
+    if ok and r then return r end
+    local ok2 = pcall(function() return CoreGui.Name end)
+    if ok2 then return CoreGui end
+    return player:WaitForChild("PlayerGui")
+end
+
+local old = parentGui():FindFirstChild("GhostHubSuporte")
+if old then old:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "GhostHubSuporte"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 99999
+gui.IgnoreGuiInset = true
+gui.Parent = parentGui()
+
+notifyHolder = Instance.new("Frame")
+notifyHolder.BackgroundTransparency = 1
+notifyHolder.AnchorPoint = Vector2.new(1, 0)
+notifyHolder.Position = UDim2.new(1, -10, 0, 10)
+notifyHolder.Size = UDim2.fromOffset(240, 400)
+notifyHolder.Parent = gui
+local nl = Instance.new("UIListLayout", notifyHolder)
+nl.Padding = UDim.new(0, 6)
+nl.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- janela principal
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(320, 400)
+main.Position = UDim2.new(0, 24, 0.5, -200)
+main.BackgroundColor3 = BG
+main.BorderSizePixel = 0
+main.Active = true
+main.Draggable = true
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+local mstroke = Instance.new("UIStroke", main)
+mstroke.Color = NEON
+mstroke.Thickness = 1.5
+mstroke.Transparency = 0.3
+
+-- detalhes de preto atras + raios de luz verde subindo
+local deco = Instance.new("Frame", main)
+deco.Size = UDim2.new(1, 0, 1, 0)
+deco.BackgroundTransparency = 1
+deco.ClipsDescendants = true
+deco.ZIndex = 0
+Instance.new("UICorner", deco).CornerRadius = UDim.new(0, 12)
+for i = 1, 7 do
+    local ray = Instance.new("Frame", deco)
+    ray.Size = UDim2.fromOffset(2, math.random(40, 110))
+    ray.Position = UDim2.new(math.random(3, 95) / 100, 0, 1, 0)
+    ray.BackgroundColor3 = NEON
+    ray.BackgroundTransparency = 0.75
+    ray.BorderSizePixel = 0
+    ray.Rotation = 18
+    Instance.new("UICorner", ray).CornerRadius = UDim.new(1, 0)
+    task.spawn(function()
+        while ray.Parent do
+            ray.Position = UDim2.new(math.random(3, 95) / 100, 0, 1, 20)
+            local t = TweenService:Create(ray, TweenInfo.new(math.random(35, 70) / 10, Enum.EasingStyle.Linear), { Position = UDim2.new(ray.Position.X.Scale, 0, -0.3, 0) })
+            t:Play(); t.Completed:Wait()
+            task.wait(math.random(5, 25) / 10)
+        end
+    end)
+end
+
+-- topo
+local top = Instance.new("Frame", main)
+top.Size = UDim2.new(1, 0, 0, 46)
+top.BackgroundColor3 = BG2
+top.BorderSizePixel = 0
+top.ZIndex = 2
+Instance.new("UICorner", top).CornerRadius = UDim.new(0, 12)
+
+local ghost = Instance.new("ImageLabel", top)
+ghost.BackgroundTransparency = 1
+ghost.Image = GHOST_IMG
+ghost.Size = UDim2.fromOffset(30, 30)
+ghost.Position = UDim2.fromOffset(10, 8)
+ghost.ImageColor3 = NEON
+ghost.ZIndex = 3
+task.spawn(function()
+    while ghost.Parent do
+        TweenService:Create(ghost, TweenInfo.new(1.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), { Position = UDim2.fromOffset(10, 3) }):Play()
+        task.wait(1.4)
+        TweenService:Create(ghost, TweenInfo.new(1.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), { Position = UDim2.fromOffset(10, 11) }):Play()
+        task.wait(1.4)
+    end
+end)
+
+local titleL = Instance.new("TextLabel", top)
+titleL.BackgroundTransparency = 1
+titleL.Position = UDim2.fromOffset(48, 4)
+titleL.Size = UDim2.new(1, -100, 0, 22)
+titleL.TextXAlignment = Enum.TextXAlignment.Left
+titleL.Font = Enum.Font.GothamBlack
+titleL.TextSize = 15
+titleL.TextColor3 = NEON
+titleL.Text = "GHOST HUB-SUPORTE"
+titleL.ZIndex = 3
+
+local subL = Instance.new("TextLabel", top)
+subL.BackgroundTransparency = 1
+subL.Position = UDim2.fromOffset(48, 24)
+subL.Size = UDim2.new(1, -100, 0, 16)
+subL.TextXAlignment = Enum.TextXAlignment.Left
+subL.Font = Enum.Font.Gotham
+subL.TextSize = 11
+subL.TextColor3 = BLUE
+subL.Text = "Chest • Fruits • Mobs"
+subL.ZIndex = 3
+
+local minBtn = Instance.new("TextButton", top)
+minBtn.Size = UDim2.fromOffset(28, 28)
+minBtn.Position = UDim2.new(1, -36, 0, 9)
+minBtn.BackgroundColor3 = BG3
+minBtn.Text = "—"
+minBtn.TextColor3 = NEON
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 16
+minBtn.ZIndex = 3
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 8)
+
+-- tabs
+local tabBar = Instance.new("Frame", main)
+tabBar.Size = UDim2.new(1, -16, 0, 30)
+tabBar.Position = UDim2.fromOffset(8, 52)
+tabBar.BackgroundTransparency = 1
+tabBar.ZIndex = 2
+local tl = Instance.new("UIListLayout", tabBar)
+tl.FillDirection = Enum.FillDirection.Horizontal
+tl.Padding = UDim.new(0, 4)
+
+local pages, tabs = {}, {}
+local function makePage(name, icon)
+    local btn = Instance.new("TextButton", tabBar)
+    btn.Size = UDim2.fromOffset(72, 30)
+    btn.BackgroundColor3 = BG3
+    btn.Text = name
+    btn.TextColor3 = Color3.fromRGB(150, 165, 180)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11
+    btn.ZIndex = 3
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+
+    local page = Instance.new("ScrollingFrame", main)
+    page.Size = UDim2.new(1, -16, 1, -116)
+    page.Position = UDim2.fromOffset(8, 88)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.ScrollBarThickness = 3
+    page.ScrollBarImageColor3 = NEON
+    page.CanvasSize = UDim2.new(0, 0, 0, 0)
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.Visible = false
+    page.ZIndex = 2
+    local pl = Instance.new("UIListLayout", page)
+    pl.Padding = UDim.new(0, 6)
+    pages[name] = page
+    tabs[name] = btn
+
+    btn.MouseButton1Click:Connect(function()
+        for n, p in pairs(pages) do
+            p.Visible = (n == name)
+            tabs[n].BackgroundColor3 = (n == name) and BLUE or BG3
+            tabs[n].TextColor3 = (n == name) and WHITE or Color3.fromRGB(150, 165, 180)
+        end
+    end)
+    return page
+end
+
+local status = Instance.new("TextLabel", main)
+status.Size = UDim2.new(1, -16, 0, 20)
+status.Position = UDim2.new(0, 8, 1, -24)
+status.BackgroundTransparency = 1
+status.Font = Enum.Font.Gotham
+status.TextSize = 11
+status.TextColor3 = Color3.fromRGB(140, 155, 170)
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Text = "Status: Parado"
+status.ZIndex = 3
+
+-- widgets
+local function glow(frame, on)
+    local st = frame:FindFirstChildOfClass("UIStroke")
+    if not st then return end
+    TweenService:Create(st, TweenInfo.new(0.25), {
+        Color = on and NEON or Color3.fromRGB(40, 48, 60),
+        Transparency = on and 0 or 0.4,
+        Thickness = on and 2 or 1,
+    }):Play()
+end
+
+local function Toggle(page, label, default, cb)
+    local f = Instance.new("Frame", page)
+    f.Size = UDim2.new(1, -6, 0, 34)
+    f.BackgroundColor3 = BG2
+    f.BorderSizePixel = 0
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
+    local st = Instance.new("UIStroke", f)
+    st.Color = Color3.fromRGB(40, 48, 60); st.Thickness = 1; st.Transparency = 0.4
+
+    local dot = Instance.new("Frame", f)
+    dot.Size = UDim2.fromOffset(8, 8)
+    dot.Position = UDim2.fromOffset(10, 13)
+    dot.BackgroundColor3 = Color3.fromRGB(70, 80, 95)
+    dot.BorderSizePixel = 0
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+    local t = Instance.new("TextLabel", f)
+    t.BackgroundTransparency = 1
+    t.Position = UDim2.fromOffset(26, 0)
+    t.Size = UDim2.new(1, -34, 1, 0)
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Font = Enum.Font.GothamMedium
+    t.TextSize = 12
+    t.TextColor3 = WHITE
+    t.Text = label
+
+    local btn = Instance.new("TextButton", f)
+    btn.BackgroundTransparency = 1
+    btn.Size = UDim2.new(1, 0, 1, 0)
+    btn.Text = ""
+
+    local on = default
+    local function apply(anim)
+        glow(f, on)
+        TweenService:Create(dot, TweenInfo.new(0.2), { BackgroundColor3 = on and NEON or Color3.fromRGB(70, 80, 95) }):Play()
+        if anim then
+            if on then Notify(label, "ATIVADO", NEON) else Notify(label, "Desativado", Color3.fromRGB(255, 120, 120)) end
+        end
+    end
+    btn.MouseButton1Click:Connect(function()
+        on = not on
+        apply(true)
+        cb(on)
+    end)
+    apply(false)
+    return f
+end
+
+local function Box(page, label, default, cb)
+    local f = Instance.new("Frame", page)
+    f.Size = UDim2.new(1, -6, 0, 34)
+    f.BackgroundColor3 = BG2
+    f.BorderSizePixel = 0
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
+    local st = Instance.new("UIStroke", f)
+    st.Color = Color3.fromRGB(40, 48, 60); st.Thickness = 1; st.Transparency = 0.4
+
+    local t = Instance.new("TextLabel", f)
+    t.BackgroundTransparency = 1
+    t.Position = UDim2.fromOffset(10, 0)
+    t.Size = UDim2.new(0.58, 0, 1, 0)
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Font = Enum.Font.GothamMedium
+    t.TextSize = 12
+    t.TextColor3 = WHITE
+    t.Text = label
+
+    local input = Instance.new("TextBox", f)
+    input.Size = UDim2.new(0.36, 0, 0, 24)
+    input.Position = UDim2.new(0.6, 0, 0, 5)
+    input.BackgroundColor3 = BG3
+    input.TextColor3 = NEON
+    input.Font = Enum.Font.GothamBold
+    input.TextSize = 12
+    input.ClearTextOnFocus = false
+    input.Text = tostring(default)
+    Instance.new("UICorner", input).CornerRadius = UDim.new(0, 6)
+
+    input.Focused:Connect(function() glow(f, true) end)
+    input.FocusLost:Connect(function()
+        local v = tonumber(input.Text)
+        if v then cb(v) else input.Text = tostring(default) end
+        glow(f, false)
+    end)
+    return input
+end
+
+local function Cycle(page, label, opts, default, cb)
+    local f = Instance.new("Frame", page)
+    f.Size = UDim2.new(1, -6, 0, 34)
+    f.BackgroundColor3 = BG2
+    f.BorderSizePixel = 0
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
+    local st = Instance.new("UIStroke", f)
+    st.Color = Color3.fromRGB(40, 48, 60); st.Thickness = 1; st.Transparency = 0.4
+
+    local idx = 1
+    for i, o in ipairs(opts) do if o == default then idx = i end end
+
+    local btn = Instance.new("TextButton", f)
+    btn.BackgroundTransparency = 1
+    btn.Size = UDim2.new(1, 0, 1, 0)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.TextColor3 = BLUE
+    btn.Text = label .. ": " .. opts[idx]
+    btn.MouseButton1Click:Connect(function()
+        idx = (idx % #opts) + 1
+        btn.Text = label .. ": " .. opts[idx]
+        glow(f, true); task.delay(0.5, function() glow(f, false) end)
+        cb(opts[idx])
+    end)
+    return btn
+end
+
+local function Button(page, label, cb)
+    local f = Instance.new("TextButton", page)
+    f.Size = UDim2.new(1, -6, 0, 32)
+    f.BackgroundColor3 = BLUE
+    f.BorderSizePixel = 0
+    f.Font = Enum.Font.GothamBold
+    f.TextSize = 12
+    f.TextColor3 = WHITE
+    f.Text = label
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
+    f.MouseButton1Click:Connect(cb)
+    return f
+end
+
+local function Header(page, txt)
+    local t = Instance.new("TextLabel", page)
+    t.Size = UDim2.new(1, -6, 0, 22)
+    t.BackgroundTransparency = 1
+    t.Font = Enum.Font.GothamBlack
+    t.TextSize = 11
+    t.TextColor3 = NEON
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Text = "— " .. txt
+end
+
+----------------------------------------------------------------- PÁGINAS
+local pChest = makePage("CHEST")
+Header(pChest, "AUTO CHEST")
+Toggle(pChest, "Auto Chest", false, function(v)
+    S.FarmChest = v
+    if v then ChatMsg("[GHOST HUB-SUPORTE] Auto Chest ATIVADO", NEON) end
+end)
+Cycle(pChest, "Método", { "Tween", "TP", "TweenTP" }, "Tween", function(v) S.Method = v end)
+Box(pChest, "Speed Tween", 300, function(v) S.TweenSpeed = math.clamp(v, 1, 10000); _G.TweenSpeed = S.TweenSpeed end)
+Box(pChest, "Tween+TP metros", 20, function(v) S.TPRange = v end)
+Box(pChest, "Delay no baú", 0, function(v) S.TPDelay = v end)
+Box(pChest, "Grab & Go (s)", 0.05, function(v) S.GrabTime = v end)
+Header(pChest, "BOOST")
+Toggle(pChest, "Boost Speed perto do baú", true, function(v) S.BoostOn = v end)
+Box(pChest, "Boost em X metros", 150, function(v) S.BoostDist = v end)
+Box(pChest, "Boost Speed", 900, function(v) S.BoostSpeed = math.clamp(v, 1, 10000) end)
+Header(pChest, "VERIFICAR DINHEIRO")
+Toggle(pChest, "Verificar Beli", false, function(v) S.BeliCheck = v end)
+Box(pChest, "Verificar a cada (s)", 1.0, function(v) S.BeliEvery = v end)
+Header(pChest, "FILTROS")
+Toggle(pChest, "Baú Prata", true, function(v) S.FarmSilver = v end)
+Toggle(pChest, "Baú Ouro", true, function(v) S.FarmGold = v end)
+Toggle(pChest, "Baú Diamante", true, function(v) S.FarmDiamond = v end)
+Toggle(pChest, "Baú sem skin (invisível)", false, function(v) S.NoSkin = v end)
+Toggle(pChest, "Caixa colorida no baú", false, function(v)
+    S.BoxChest = v
+    if not v then clearBoxes() end
+end)
+Toggle(pChest, "STOP em item raro", true, function(v) S.StopLegend = v end)
+
+local pFruit = makePage("FRUITS")
+Header(pFruit, "FRUTAS DROPADAS")
+Toggle(pFruit, "Auto Fruits", false, function(v) S.AutoFruit = v end)
+Cycle(pFruit, "Modo", { "Tween", "TP", "Bring" }, "Tween", function(v) S.FruitMode = v end)
+Box(pFruit, "Speed Fruits (0-10000)", 300, function(v) S.FruitSpeed = math.clamp(v, 0, 10000) end)
+Toggle(pFruit, "Notificar fruta spawnada", true, function(v) S.FruitNotify = v end)
+Toggle(pFruit, "Blacklist (maçã/banana/abacaxi)", true, function(v) S.UseBlacklist = v end)
+Header(pFruit, "RARIDADE")
+for _, r in ipairs({ "Common", "Uncommon", "Rare", "Legendary", "Mythical" }) do
+    Toggle(pFruit, r, S.Rarity[r], function(v) S.Rarity[r] = v end)
+end
+
+local pMob = makePage("MOBS")
+Header(pMob, "MOB PULL")
+Toggle(pMob, "Mob Pull", false, function(v)
+    S.MobPull = v
+    if v then ChatMsg("[GHOST HUB-SUPORTE] Mob Pull ATIVADO", NEON) end
+end)
+Cycle(pMob, "Modo", { "Tween", "TP" }, "Tween", function(v) S.MobMode = v end)
+Box(pMob, "Raio de busca", 2000, function(v) S.MobRadius = v end)
+Box(pMob, "Quantos mobs (0=todos)", 0, function(v) S.MobLimit = math.max(v, 0) end)
+Box(pMob, "Tamanho da roda", 14, function(v) S.MobCircle = v end)
+Box(pMob, "Altura", 0, function(v) S.MobHeight = v end)
+Toggle(pMob, "Roda girando devagar", true, function(v) S.MobSpin = v end)
+Box(pMob, "Velocidade do giro", 0.35, function(v) S.MobSpinSpeed = v end)
+Toggle(pMob, "Só mobs da missão", false, function(v) S.MobQuestOnly = v end)
+Toggle(pMob, "Incluir Raid / Dungeon", true, function(v) S.MobRaid = v end)
+Button(pMob, "RESET (morrer e renascer)", function()
+    resetChar()
+    Notify("Reset", "Renascendo...", BLUE)
+end)
+
+local pMisc = makePage("MISC")
+Header(pMisc, "MÚSICA")
+Toggle(pMisc, "Tocar música", false, function(v)
+    S.MusicOn = v
+    if v then playMusic() else music:Stop() end
+end)
+local musicLbl
+musicLbl = Cycle(pMisc, "Preset", (function()
+    local t = {}
+    for _, m in ipairs(MUSICAS) do table.insert(t, m.n) end
+    return t
+end)(), MUSICAS[1].n, function(v)
+    for _, m in ipairs(MUSICAS) do
+        if m.n == v then S.MusicId = m.id end
+    end
+    if S.MusicOn then playMusic() end
+end)
+Box(pMisc, "ID da música", S.MusicId, function(v)
+    S.MusicId = math.floor(v)
+    if S.MusicOn then playMusic() end
+end)
+Box(pMisc, "Volume (0-10)", 3, function(v)
+    S.Volume = math.clamp(v, 0, 10)
+    music.Volume = S.Volume / 10
+end)
+Header(pMisc, "TELA")
+Box(pMisc, "FOV", 70, function(v) S.FOV = math.clamp(v, 20, 120) end)
+
+pages["CHEST"].Visible = true
+tabs["CHEST"].BackgroundColor3 = BLUE
+tabs["CHEST"].TextColor3 = WHITE
+
+----------------------------------------------------------------- PAINEL FINANCEIRO
+local fin = Instance.new("Frame")
+fin.Size = UDim2.fromOffset(190, 118)
+fin.Position = UDim2.new(0, 360, 0.5, -200)
+fin.BackgroundColor3 = BG
+fin.BorderSizePixel = 0
+fin.Active = true
+fin.Draggable = true
+fin.Parent = gui
+Instance.new("UICorner", fin).CornerRadius = UDim.new(0, 10)
+local fst = Instance.new("UIStroke", fin)
+fst.Color = BLUE; fst.Thickness = 1.5; fst.Transparency = 0.25
+
+local finTop = Instance.new("TextLabel", fin)
+finTop.Size = UDim2.new(1, 0, 0, 26)
+finTop.BackgroundColor3 = BG2
+finTop.BorderSizePixel = 0
+finTop.Font = Enum.Font.GothamBlack
+finTop.TextSize = 12
+finTop.TextColor3 = NEON
+finTop.Text = "GHOST • FINANCEIRO"
+Instance.new("UICorner", finTop).CornerRadius = UDim.new(0, 10)
+
+local finTxt = Instance.new("TextLabel", fin)
+finTxt.BackgroundTransparency = 1
+finTxt.Position = UDim2.fromOffset(10, 30)
+finTxt.Size = UDim2.new(1, -20, 1, -36)
+finTxt.Font = Enum.Font.Gotham
+finTxt.TextSize = 11
+finTxt.TextColor3 = WHITE
+finTxt.TextXAlignment = Enum.TextXAlignment.Left
+finTxt.TextYAlignment = Enum.TextYAlignment.Top
+finTxt.Text = ""
+
+local finMin = Instance.new("TextButton", fin)
+finMin.Size = UDim2.fromOffset(20, 20)
+finMin.Position = UDim2.new(1, -25, 0, 3)
+finMin.BackgroundTransparency = 1
+finMin.Text = "—"
+finMin.TextColor3 = NEON
+finMin.Font = Enum.Font.GothamBold
+finMin.TextSize = 14
+local finOpen = true
+finMin.MouseButton1Click:Connect(function()
+    finOpen = not finOpen
+    finTxt.Visible = finOpen
+    fin.Size = finOpen and UDim2.fromOffset(190, 118) or UDim2.fromOffset(190, 26)
+end)
+
+local t0 = tick()
+task.spawn(function()
+    while gui.Parent do
+        task.wait(1)
+        local beli = getBeli()
+        local ganho = beli - beliStart
+        local mins = math.max((tick() - t0) / 60, 0.01)
+        finTxt.Text = string.format(
+            "Baús: %d\nBeli ganho: %s\nBeli/min: %s\nTempo: %dm %ds",
+            chestCount, tostring(ganho), tostring(math.floor(ganho / mins)),
+            math.floor((tick() - t0) / 60), math.floor((tick() - t0) % 60)
+        )
+        status.Text = "Status: " .. statusTxt
+    end
+end)
+
+----------------------------------------------------------------- BOLINHA FANTASMA
+local ball = Instance.new("ImageButton")
+ball.Size = UDim2.fromOffset(52, 52)
+ball.Position = UDim2.new(0, 16, 0.32, 0)
+ball.BackgroundColor3 = BG
+ball.BorderSizePixel = 0
+ball.Image = GHOST_IMG
+ball.ImageColor3 = NEON
+ball.ScaleType = Enum.ScaleType.Fit
+ball.Active = true
+ball.Draggable = true
+ball.Parent = gui
+Instance.new("UICorner", ball).CornerRadius = UDim.new(1, 0)
+local bst = Instance.new("UIStroke", ball)
+bst.Color = NEON; bst.Thickness = 2; bst.Transparency = 0.2
+
+task.spawn(function()
+    while ball.Parent do
+        TweenService:Create(bst, TweenInfo.new(1, Enum.EasingStyle.Sine), { Transparency = 0.65 }):Play()
+        task.wait(1)
+        TweenService:Create(bst, TweenInfo.new(1, Enum.EasingStyle.Sine), { Transparency = 0.1 }):Play()
+        task.wait(1)
+    end
+end)
+
+local shown = true
+local function setShown(v)
+    shown = v
+    main.Visible = v
+    fin.Visible = v
+end
+ball.MouseButton1Click:Connect(function() setShown(not shown) end)
+minBtn.MouseButton1Click:Connect(function() setShown(false) end)
+
+UserInputService.InputBegan:Connect(function(i, gp)
+    if not gp and i.KeyCode == Enum.KeyCode.LeftControl then setShown(not shown) end
+end)
+
+----------------------------------------------------------------- START
+ChatMsg("[GHOST HUB-SUPORTE] SCRIPT FOI ATIVADO ✅", NEON)
+Notify("GHOST HUB-SUPORTE", "Script carregado! Tween 300 pronto.", NEON)
+
+_G.GHOSTSUP_CLEANUP = function()
+    S.FarmChest = false; S.AutoFruit = false; S.MobPull = false
+    moving = false
+    pcall(function() hb:Disconnect() end)
+    pcall(function() music:Stop(); music:Destroy() end)
+    clearBoxes(); killPart()
+    pcall(function() gui:Destroy() end)
+end
